@@ -15,10 +15,10 @@
   },
   "dependencies": {
     "@date-fns/tz": "catalog:",
-    "@skland-x/core": "workspace:*",
     "date-fns": "catalog:",
     "defu": "catalog:",
     "skland-kit": "catalog:lib",
+    "statocysts": "catalog:lib",
     "unctx": "catalog:",
     "unstorage": "catalog:"
   },

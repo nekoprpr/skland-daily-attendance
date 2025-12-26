@@ -1,14 +1,11 @@
-import type { AttendanceStatus } from 'skland-kit'
+import type { AppBindingPlayer } from 'skland-kit'
+import type { CreateMessageCollectorOptions } from './utils'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { createClient } from 'skland-kit'
-import { createSender } from 'statocysts'
+import { createMessageCollector, formatCharacterName, isTodayAttended } from './utils'
 
 const client = createClient()
-
-interface Options {
-  notificationUrls?: string | string[]
-}
 
 interface AttendanceResult {
   success: boolean
@@ -16,61 +13,9 @@ interface AttendanceResult {
   hasError: boolean
 }
 
-// Helper function to check if today's attendance is already done
-function isTodayAttended(attendanceStatus: AttendanceStatus): boolean {
-  const today = new Date().setHours(0, 0, 0, 0)
-  return attendanceStatus.records.some((record) => {
-    return new Date(Number(record.ts) * 1000).setHours(0, 0, 0, 0) === today
-  })
-}
-
-// Helper function to convert single value to array
-function toArray<T>(value: T | T[]): T[] {
-  return Array.isArray(value) ? value : [value]
-}
-
-// Helper function to get server name
-function getServerName(channelMasterId: string): string {
-  return Number(channelMasterId) - 1 ? 'B 服' : '官服'
-}
-
-function createMessageCollector(options: Options) {
-  const messages: string[] = []
-  let hasError = false
-
-  const log = (message: string, isError = false) => {
-    messages.push(message)
-    console[isError ? 'error' : 'log'](message)
-    if (isError) {
-      hasError = true
-    }
-  }
-
-  const push = async () => {
-    const title = '【森空岛每日签到】'
-    const content = messages.join('\n\n')
-    const urls = options.notificationUrls ? toArray(options.notificationUrls) : []
-    const sender = createSender(urls)
-
-    await sender.send(title, content)
-
-    // Exit with error if any error occurred
-    if (hasError) {
-      process.exit(1)
-    }
-  }
-
-  return { log, push, hasError: () => hasError } as const
-}
-
 // Attend for a single character with retry logic
-async function attendCharacter(
-  character: { uid: string, channelMasterId: string },
-  index: number,
-  maxRetries: number,
-): Promise<AttendanceResult> {
-  const serverName = getServerName(character.channelMasterId)
-  const characterLabel = `${serverName}角色 ${index + 1}`
+async function attendCharacter(character: AppBindingPlayer, maxRetries: number): Promise<AttendanceResult> {
+  const characterLabel = formatCharacterName(character)
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -135,7 +80,7 @@ async function attendCharacter(
   }
 }
 
-export async function doAttendanceForAccount(token: string, options: Options) {
+export async function doAttendanceForAccount(token: string, options: CreateMessageCollectorOptions) {
   const { code } = await client.collections.hypergryph.grantAuthorizeCode(token)
   await client.signIn(code)
 
@@ -156,7 +101,7 @@ export async function doAttendanceForAccount(token: string, options: Options) {
     const character = characterList[i]
     console.log(`正在签到第 ${i + 1}/${characterList.length} 个角色`)
 
-    const result = await attendCharacter(character, i, maxRetries)
+    const result = await attendCharacter(character, maxRetries)
     results.push(result)
     messageCollector.log(result.message, result.hasError)
 

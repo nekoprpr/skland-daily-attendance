@@ -1,6 +1,5 @@
-import type { AppBindingPlayer, AttendanceStatus } from 'skland-kit'
-import { createSender } from 'statocysts'
-import { useContext } from './context'
+import type { AppBindingPlayer, AttendanceStatus } from "skland-kit"
+import { createSender } from "statocysts"
 
 export function isTodayAttended(attendanceStatus: AttendanceStatus): boolean {
   const today = new Date().setHours(0, 0, 0, 0)
@@ -32,17 +31,21 @@ export function formatPrivacyName(nickName: string) {
 
   return `${firstChar}${stars}${lastChar}#${number}`
 }
-export async function retry<T>(fn: () => Promise<T>, retries?: number): Promise<T> {
-  const { config } = useContext()
-  retries = retries ?? config.MAX_RETRIES
+
+export async function retry<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  delay = 1000,
+): Promise<T> {
+
   try {
     return await fn()
   }
   catch (error) {
     if (retries > 0) {
       console.log(`操作失败，剩余重试次数: ${retries}`)
-      await new Promise(resolve => setTimeout(resolve, config.RETRY_DELAY))
-      return retry(fn, retries - 1)
+      await new Promise(resolve => setTimeout(resolve, delay))
+      return retry(fn, retries - 1, delay)
     }
     throw error
   }

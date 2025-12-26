@@ -8,7 +8,6 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@skland-x/core": "workspace:*",
     "skland-kit": "catalog:lib",
     "statocysts": "catalog:lib",
     "tsx": "catalog:"

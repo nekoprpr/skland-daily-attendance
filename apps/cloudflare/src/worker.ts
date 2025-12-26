@@ -1,33 +1,12 @@
-import type { BindingUserItem } from '@skland-x/core'
-import type { Storage } from 'unstorage'
+import type { AppBindingPlayer, Client } from 'skland-kit'
 import { TZDate } from '@date-fns/tz'
-import { attendance, auth, getBinding, signIn } from '@skland-x/core'
 import { format, sub } from 'date-fns'
 import { defu } from 'defu'
+import { createClient } from 'skland-kit'
 import { createStorage } from 'unstorage'
 import cloudflareKVBindingDriver from 'unstorage/drivers/cloudflare-kv-binding'
 import { context, DEFULAT_CONFIG, useContext } from './context'
-import { pick, retry } from './utils'
-
-function formatCharacterName(character: BindingUserItem) {
-  return `${formatChannelName(character.channelMasterId)}角色${formatPrivacyName(character.nickName)}`
-}
-
-function formatChannelName(channelMasterId: string) {
-  return (Number(channelMasterId) - 1) ? 'B 服' : '官服'
-}
-
-function formatPrivacyName(nickName: string) {
-  const [name, number] = nickName.split('#')
-  if (name.length <= 2)
-    return nickName
-
-  const firstChar = name[0]
-  const lastChar = name[name.length - 1]
-  const stars = '*'.repeat(name.length - 2)
-
-  return `${firstChar}${stars}${lastChar}#${number}`
-}
+import { createMessageCollector, formatCharacterName, isTodayAttended, pick, retry } from './utils'
 
 async function cleanOutdatedData() {
   const { storage } = useContext()
@@ -53,23 +32,8 @@ async function cleanOutdatedData() {
   await Promise.all(keysToRemove.map(i => storage.removeItem(i.key)))
 }
 
-// 错误处理函数
-async function handleAttendanceError(error: any, character: BindingUserItem, storage: Storage, key: string) {
-  if (error.response?.status === 403) {
-    console.log(`${formatCharacterName(character)}今天已经签到过了`)
-    await storage.setItem(key, true)
-    return true
-  }
-
-  console.error(`签到过程中出现错误: ${error.message}`)
-  if (error.response?.data) {
-    console.error('错误详情:', JSON.stringify(error.response.data, null, 2))
-  }
-  return false
-}
-
 // 签到单个角色
-async function attendSingleCharacter(character: BindingUserItem, cred: string, signToken: string) {
+async function attendSingleCharacter(character: AppBindingPlayer, client: Client) {
   const { config, storage, today } = useContext()
   const key = `${config.ATTENDANCE_STORAGE_PREFIX}${format(today, 'yyyy-MM-dd')}:${character.uid}`
   const isAttended = await storage.getItem(key)
@@ -81,46 +45,44 @@ async function attendSingleCharacter(character: BindingUserItem, cred: string, s
 
   return retry(async () => {
     try {
-      const data = await attendance(cred, signToken, {
+      const query = {
         uid: character.uid,
         gameId: character.channelMasterId,
-      })
+      }
 
-      if (!data) {
+      // Check attendance status first
+      const attendanceStatus = await client.collections.game.getAttendanceStatus(query)
+
+      if (isTodayAttended(attendanceStatus)) {
         console.log(`${formatCharacterName(character)}今天已经签到过了`)
         await storage.setItem(key, true)
         return true
       }
 
-      if (data.code === 0 && data.message === 'OK') {
-        const awards = data.data.awards.map(a => `「${a.resource.name}」${a.count}个`).join(',')
-        const msg = `${formatCharacterName(character)}签到成功${awards ? `, 获得了${awards}` : ''}`
-        console.log(msg)
+      // Perform attendance
+      const data = await client.collections.game.attendance(query)
+      const awards = data.awards.map(a => `「${a.resource.name}」${a.count}个`).join(',')
+      const msg = `${formatCharacterName(character)}签到成功${awards ? `, 获得了${awards}` : ''}`
+      console.log(msg)
+      await storage.setItem(key, true)
+      return true
+    }
+    catch (error: any) {
+      // Handle 403 error as already attended
+      if (error.response?.status === 403) {
+        console.log(`${formatCharacterName(character)}今天已经签到过了`)
         await storage.setItem(key, true)
         return true
       }
 
-      const msg = `${formatCharacterName(character)}签到失败, 错误消息: ${data.message}`
+      const msg = `${formatCharacterName(character)}签到失败, 错误消息: ${error.message || error}`
       console.error(msg)
-      console.error('详细错误信息:', JSON.stringify(data, null, 2))
+      if (error.response?.data) {
+        console.error('详细错误信息:', JSON.stringify(error.response.data, null, 2))
+      }
       return false
     }
-    catch (error: any) {
-      return handleAttendanceError(error, character, storage, key)
-    }
   })
-}
-
-async function authorizeSklandAccount(token: string) {
-  const { code } = await auth(token)
-  const { cred, token: signToken, userId } = await signIn(code)
-
-  return { cred, signToken, userId }
-}
-
-async function getArknightsCharacterList(cred: string, signToken: string) {
-  const { list } = await getBinding(cred, signToken)
-  return list.filter(i => i.appCode === 'arknights').map(i => i.bindingList).flat()
 }
 
 async function checkUserBindingsAllAttended(userId: string) {
@@ -162,8 +124,6 @@ async function checkUserBindingsAllAttended(userId: string) {
 
 export default {
   async fetch() {
-    const module = WebAssembly.validate
-    console.log(module)
     return new Response(`Running in ${navigator.userAgent}!`)
   },
   async scheduled(_event, env, _ctx): Promise<void> {
@@ -173,6 +133,10 @@ export default {
 
     const config = defu({}, DEFULAT_CONFIG, pick(env, Object.keys(DEFULAT_CONFIG) as (keyof typeof DEFULAT_CONFIG)[]))
 
+    const messageCollector = createMessageCollector({
+      notificationUrls: config.NOTIFICATION_URLS,
+    })
+
     const storage = createStorage({
       driver: cloudflareKVBindingDriver({ binding: env.SKLAND_DAILY_ATTENDANCE_STORAGE }),
     })
@@ -181,29 +145,42 @@ export default {
       config,
       storage,
       today: new TZDate().withTimeZone('Asia/Shanghai'),
+      messageCollector
     })
 
     const tokens = env.SKLAND_TOKEN.split(',')
-    console.log(`开始执行签到任务，共 ${tokens.length} 个账号`)
+    messageCollector.log(`开始执行签到任务，共 ${tokens.length} 个账号`)
 
     for (const [index, token] of tokens.entries()) {
-      console.log(`\n开始处理第 ${index + 1}/${tokens.length} 个账号`)
+      messageCollector.log(`\n开始处理第 ${index + 1}/${tokens.length} 个账号`)
 
       try {
-        const { cred, signToken, userId } = await retry(() => authorizeSklandAccount(token))
+        // Create client for each account
+        const client = createClient()
+
+        const { userId } = await retry(async () => {
+          const { code } = await client.collections.hypergryph.grantAuthorizeCode(token)
+          const { userId } = await client.signIn(code)
+
+          return { userId }
+        })
 
         if (await checkUserBindingsAllAttended(userId)) {
-          console.log(`账号 ${index + 1} 的所有角色已经签到完成，跳过`)
+          messageCollector.log(`账号 ${index + 1} 的所有角色已经签到完成，跳过`)
           continue
         }
 
-        const characterList = await retry(() => getArknightsCharacterList(cred, signToken))
+        const characterList = await retry(async () => {
+          const { list } = await client.collections.player.getBinding()
+          return list.filter(i => i.appCode === 'arknights').flatMap(i => i.bindingList)
+        })
+
         await storage.setItem(
           `${config.BINDINGS_STORAGE_PREFIX}${userId}`,
           characterList.map(i => i.uid.toString()),
         )
 
-        console.log(`账号 ${index + 1} 共有 ${characterList.length} 个角色需要签到`)
+        messageCollector.log(`账号 ${index + 1} 共有 ${characterList.length} 个角色需要签到`)
 
         // 使用 chunk 控制并发
         const chunks = []
@@ -213,27 +190,31 @@ export default {
 
         for (const [chunkIndex, chunk] of chunks.entries()) {
           if (chunks.length > 1) {
-            console.log(`处理第 ${chunkIndex + 1}/${chunks.length} 批角色`)
+            messageCollector.log(`处理第 ${chunkIndex + 1}/${chunks.length} 批角色`)
           }
 
           await Promise.all(chunk.map(character =>
-            attendSingleCharacter(character, cred, signToken),
+            attendSingleCharacter(character, client),
           ))
 
           if (chunkIndex < chunks.length - 1) {
-            console.log(`等待 ${config.CHUNK_DELAY}ms 后处理下一批角色`)
+            messageCollector.log(`等待 ${config.CHUNK_DELAY}ms 后处理下一批角色`)
             await new Promise(resolve => setTimeout(resolve, config.CHUNK_DELAY))
           }
         }
       }
       catch (error) {
-        console.error(`处理账号 ${index + 1} 时发生错误:`, error instanceof Error ? error.message : error)
+        messageCollector.log(
+          `处理账号 ${index + 1} 时发生错误: ${error instanceof Error ? error.message : error}`,
+          true,
+        )
         continue
       }
     }
 
     await cleanOutdatedData()
     context.unset()
-    console.log('签到任务完成')
+    messageCollector.log('签到任务完成')
+    await messageCollector.push()
   },
 } satisfies ExportedHandler<Env>
